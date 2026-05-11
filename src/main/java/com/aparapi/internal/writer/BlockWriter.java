@@ -80,6 +80,8 @@ public abstract class BlockWriter{
 
    public final static String arrayDimMangleSuffix = "__javaArrayDimension";
 
+   private final Stack<Set<String>> inlineAssignDeclarationScopes = new Stack<Set<String>>();
+
    public abstract void write(String _string);
 
    public void writeln(String _string) {
@@ -295,13 +297,68 @@ public abstract class BlockWriter{
          if (instruction instanceof CompositeInstruction) {
             writeComposite((CompositeInstruction) instruction);
          } else if (!instruction.getByteCode().equals(ByteCode.NONE)) {
-            newLine();
-            writeInstruction(instruction);
-            write(";");
+            final Set<String> inlineAssignDeclarations = new HashSet<String>();
+            writeInlineAssignDeclarations(instruction, inlineAssignDeclarations);
+            inlineAssignDeclarationScopes.push(inlineAssignDeclarations);
+            try {
+               newLine();
+               writeInstruction(instruction);
+               write(";");
+            } finally {
+               inlineAssignDeclarationScopes.pop();
+            }
 
          }
       }
 
+   }
+
+   private void writeInlineAssignDeclarations(Instruction _instruction, Set<String> _declaredVariables) throws CodeGenException {
+      if (_instruction == null) {
+         return;
+      }
+
+      if (_instruction.getByteCode().equals(ByteCode.INLINE_ASSIGN)) {
+         final InlineAssignInstruction inlineAssignInstruction = (InlineAssignInstruction) _instruction;
+         final AssignToLocalVariable assignToLocalVariable = inlineAssignInstruction.getAssignToLocalVariable();
+         final LocalVariableInfo localVariableInfo = assignToLocalVariable.getLocalVariableInfo();
+         if (assignToLocalVariable.isDeclaration()) {
+            if (localVariableInfo == null) {
+               throw new CodeGenException("outOfScope" + _instruction.getThisPC() + " = ");
+            }
+
+            final String declarationKey = getDeclarationKey(localVariableInfo);
+            if (_declaredVariables.add(declarationKey)) {
+               final String descriptor = localVariableInfo.getVariableDescriptor();
+               newLine();
+               if (descriptor.startsWith("[")) {
+                  write(" __global ");
+               }
+               write(convertType(descriptor, true, false));
+               write(localVariableInfo.getVariableName());
+               write(";");
+            }
+         }
+         writeInlineAssignDeclarations(inlineAssignInstruction.getRhs(), _declaredVariables);
+      }
+
+      for (Instruction operand = _instruction.getFirstChild(); operand != null; operand = operand.getNextExpr()) {
+         writeInlineAssignDeclarations(operand, _declaredVariables);
+      }
+   }
+
+   private String getDeclarationKey(LocalVariableInfo _localVariableInfo) {
+      return (_localVariableInfo.getVariableIndex() + ":" + _localVariableInfo.getStart());
+   }
+
+   private boolean isInlineAssignDeclarationHoisted(LocalVariableInfo _localVariableInfo) {
+      final String declarationKey = getDeclarationKey(_localVariableInfo);
+      for (Set<String> declarationScope : inlineAssignDeclarationScopes) {
+         if (declarationScope.contains(declarationKey)) {
+            return true;
+         }
+      }
+      return false;
    }
 
    protected void writeGetterBlock(FieldEntry accessorVariableFieldEntry) {
@@ -698,8 +755,10 @@ public abstract class BlockWriter{
          final AssignToLocalVariable assignToLocalVariable = inlineAssignInstruction.getAssignToLocalVariable();
 
          final LocalVariableInfo localVariableInfo = assignToLocalVariable.getLocalVariableInfo();
-         if (assignToLocalVariable.isDeclaration()) {
-            // this is bad! we need a general way to hoist up a required declaration
+         if (localVariableInfo == null) {
+            throw new CodeGenException("outOfScope" + _instruction.getThisPC() + " = ");
+         }
+         if (assignToLocalVariable.isDeclaration() && !isInlineAssignDeclarationHoisted(localVariableInfo)) {
             throw new CodeGenException("/* we can't declare this " + convertType(localVariableInfo.getVariableDescriptor(), true, false)
                   + " here */");
          }
